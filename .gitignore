@@ -1,0 +1,73 @@
+# ================================================================================
+# .gitignore - Files to NOT commit to GitHub
+# ================================================================================
+# Purpose: Prevent accidental commits of sensitive data and local files
+# Usage: Create this file as ".gitignore" in root directory
+# ================================================================================
+
+# ============ CREDENTIALS & SECRETS ============
+## NEVER commit these files
+.env                          # Local environment variables
+.env.local                    # Local overrides
+credentials.json              # Google Service Account key
+*.key                         # Any private keys
+
+# ============ SESSION & CACHE ============
+## Local session and cache files
+damadam_cookies.pkl          # Browser session cookies
+__pycache__/                 # Python cache
+*.pyc                        # Compiled Python
+*.pyo                        # Compiled Python optimized
+*.pyd                        # Python DLL
+.Python                      # Python executable
+
+# ============ VIRTUAL ENVIRONMENT ============
+## Don't commit venv folder
+venv/                        # Virtual environment folder
+env/                         # Alternative venv
+ENV/                         # Alternative venv
+.venv/                       # Alternative venv
+.env.venv                    # Alternative venv
+
+# ============ IDE & EDITOR ============
+## Don't commit IDE configuration
+.vscode/                     # VS Code settings
+.idea/                       # JetBrains IDE settings
+*.swp                        # Vim swap
+*.swo                        # Vim swap
+*~                           # Backup files
+.DS_Store                    # Mac files
+Thumbs.db                    # Windows thumb cache
+
+# ============ DATA FILES ============
+## Don't commit data exports
+*.xlsx                       # Excel files
+*.xls                        # Excel files
+*.csv                        # CSV exports
+*.json                       # Data JSON files
+output/                      # Output directory
+chromedriver.exe              # ChromeDriver executable
+
+# ============ LOGS & TEMP ============
+## Don't commit logs or temporary files
+*.log                        # Log files
+logs/                        # Log directory
+tmp/                         # Temporary files
+temp/                        # Temporary directory
+
+# ============ OS FILES ============
+## Operating system files
+.DS_Store                    # Mac
+Thumbs.db                    # Windows
+*.lnk                        # Windows shortcut
+
+# ======================== WHITELIST =========================
+# Files you DO want to commit (opposite of above):
+!.env.example                # Include template
+!requirements.txt            # Include dependencies
+!README.md                   # Include docs
+!SETUP_GUIDE.md             # Include docs
+!main.py                     # Include main script
+!.github/                    # Include workflows
+
+# ================================================================================
