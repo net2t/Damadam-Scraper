@@ -106,3 +106,4 @@ Thumbs.db                    # Windows
 # ================================================================================
 chromedriver.exe
 credentials.json
+damadam_cookies.pkl
