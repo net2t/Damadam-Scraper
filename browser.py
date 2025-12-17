@@ -1,101 +1,259 @@
 """
-================================================================================
-BROWSER.PY - HIGH LEVEL BROWSER SESSION MANAGEMENT
-================================================================================
-PURPOSE: Provide a simplified interface for creating authenticated Selenium
-         browser sessions. Wraps the lower-level utilities that live under
-         ``core.browser`` and ``core.auth`` while exposing a clean API for the
-         reorganised project layout.
-
-FEATURES:
-  - Context manager based ``BrowserSession`` for safe setup/teardown
-  - Helper to obtain an authenticated driver in a single call
-  - Re-exports cookie helpers for convenience
-================================================================================
+Browser Manager - Chrome setup and login handling
 """
 
-from __future__ import annotations
+import time
+import pickle
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-from contextlib import contextmanager
-from typing import Iterator, Optional
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
-from core.auth import authenticate as _authenticate
-from core.auth import verify_login_status as verify_login_status
-from core.browser import clear_cookies, load_cookies, save_cookies
-from core.browser import setup_browser as _setup_browser
-from core.logger import log_msg, print_error
+from config import Config
 
-__all__ = [
-    "BrowserSession",
-    "get_authenticated_driver",
-    "verify_login_status",
-    "save_cookies",
-    "load_cookies",
-    "clear_cookies",
-]
+# ==================== TIME HELPERS ====================
 
+def get_pkt_time():
+    """Get current Pakistan time (UTC+5)"""
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)
 
-class BrowserSession:
-    """Context manager that yields an authenticated Selenium driver."""
+def log_msg(msg, level="INFO"):
+    """Simple logger with timestamp"""
+    ts = get_pkt_time().strftime('%H:%M:%S')
+    prefix = f"[{level}]" if level else ""
+    print(f"[{ts}] {prefix} {msg}")
+    import sys
+    sys.stdout.flush()
 
-    def __init__(self, auto_login: bool = True):
-        self.auto_login = auto_login
+# ==================== BROWSER SETUP ====================
+
+class BrowserManager:
+    """Manages Chrome browser instance"""
+    
+    def __init__(self):
         self.driver = None
-
-    def __enter__(self):
-        log_msg("[INFO] Initializing browser session...")
-        driver = _setup_browser()
-        if not driver:
-            raise RuntimeError("Failed to initialize Chrome browser")
-
-        if self.auto_login:
-            log_msg("[LOGIN] Starting authentication...")
-            if not _authenticate(driver):
-                driver.quit()
-                raise RuntimeError("Authentication failed - check credentials")
-
-        self.driver = driver
-        return driver
-
-    def __exit__(self, exc_type, exc, tb):
+    
+    def setup(self):
+        """Initialize Chrome browser"""
+        log_msg("Initializing Chrome browser...")
+        try:
+            log_msg("Setting up Chrome browser...")
+            
+            opts = Options()
+            opts.add_argument("--headless=new")
+            opts.add_argument("--window-size=1920,1080")
+            opts.add_argument("--disable-blink-features=AutomationControlled")
+            opts.add_experimental_option('excludeSwitches', ['enable-automation'])
+            opts.add_experimental_option('useAutomationExtension', False)
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-gpu")
+            opts.add_argument("--log-level=3")  # Suppress Chrome logs
+            
+            # Use custom ChromeDriver path if provided
+            if Config.CHROMEDRIVER_PATH and Path(Config.CHROMEDRIVER_PATH).exists():
+                log_msg(f"Using custom ChromeDriver: {Config.CHROMEDRIVER_PATH}")
+                service = Service(executable_path=Config.CHROMEDRIVER_PATH)
+                self.driver = webdriver.Chrome(service=service, options=opts)
+            else:
+                log_msg("Using system ChromeDriver")
+                self.driver = webdriver.Chrome(options=opts)
+            
+            self.driver.set_page_load_timeout(Config.PAGE_LOAD_TIMEOUT)
+            self.driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+            
+            log_msg("Browser initialized successfully", "OK")
+            return self.driver
+        
+        except Exception as e:
+            log_msg(f"Browser setup failed: {e}", "ERROR")
+            return None
+    
+    def close(self):
+        """Close browser safely"""
         if self.driver:
             try:
                 self.driver.quit()
-                log_msg("[INFO] Browser closed")
-            except Exception:
+                log_msg("Browser closed")
+            except:
                 pass
-            finally:
-                self.driver = None
+
+# ==================== COOKIE MANAGEMENT ====================
+
+def save_cookies(driver):
+    """Save cookies to file"""
+    try:
+        with open(Config.COOKIE_FILE, 'wb') as f:
+            cookies = driver.get_cookies()
+            pickle.dump(cookies, f)
+            log_msg(f"Cookies saved ({len(cookies)} items)", "OK")
+        return True
+    except Exception as e:
+        log_msg(f"Cookie save failed: {e}", "ERROR")
         return False
 
+def load_cookies(driver):
+    """Load cookies from file"""
+    try:
+        if not Config.COOKIE_FILE.exists():
+            log_msg("No saved cookies found")
+            return False
+        
+        with open(Config.COOKIE_FILE, 'rb') as f:
+            cookies = pickle.load(f)
+        
+        for cookie in cookies:
+            try:
+                driver.add_cookie(cookie)
+            except:
+                pass
+        
+        log_msg(f"Cookies loaded ({len(cookies)} items)", "OK")
+        return True
+    
+    except Exception as e:
+        log_msg(f"Cookie load failed: {e}")
+        return False
 
-def get_authenticated_driver(auto_login: bool = True):
-    """Return an authenticated Selenium driver (caller must quit)."""
-    session = BrowserSession(auto_login=auto_login)
-    driver = session.__enter__()
+# ==================== LOGIN HANDLER ====================
 
-    class _DriverWrapper:
-        def __init__(self, drv, session_obj):
-            self._driver = drv
-            self._session = session_obj
-
-        def __getattr__(self, item):
-            return getattr(self._driver, item)
-
-        def quit(self):  # ensures __exit__ logic runs once
-            if self._driver:
-                try:
-                    self._driver.quit()
-                    log_msg("[INFO] Browser closed")
-                finally:
-                    self._driver = None
-                    session.__exit__(None, None, None)
-
-    return _DriverWrapper(driver, session)
-
-
-@contextmanager
-def browser_session(auto_login: bool = True) -> Iterator:
-    """Yield an authenticated driver using a context manager helper."""
-    with BrowserSession(auto_login=auto_login) as driver:
-        yield driver
+class LoginManager:
+    """Handles DamaDam login"""
+    
+    def __init__(self, driver):
+        self.driver = driver
+    
+    def login(self):
+        """Attempt login with saved cookies or credentials"""
+        log_msg("Starting authentication...", "LOGIN")
+        
+        try:
+            # Try cookie login first
+            if self._try_cookie_login():
+                return True
+            
+            # Fresh login
+            return self._fresh_login()
+        
+        except Exception as e:
+            log_msg(f"Login failed: {e}", "ERROR")
+            return False
+    
+    def _try_cookie_login(self):
+        """Try logging in with saved cookies"""
+        log_msg("Attempting cookie-based login...", "LOGIN")
+        
+        try:
+            self.driver.get(Config.HOME_URL)
+            time.sleep(2)
+            
+            if not load_cookies(self.driver):
+                return False
+            
+            self.driver.refresh()
+            time.sleep(3)
+            
+            # Check if we're logged in
+            if 'login' not in self.driver.current_url.lower():
+                log_msg("Cookie login successful", "OK")
+                return True
+            
+            return False
+        
+        except Exception as e:
+            log_msg(f"Cookie login failed: {e}")
+            return False
+    
+    def _fresh_login(self):
+        """Perform fresh login with credentials"""
+        log_msg("Starting authentication process...", "LOGIN")
+        
+        try:
+            log_msg("Navigating to login page...", "LOGIN")
+            self.driver.get(Config.LOGIN_URL)
+            time.sleep(3)
+            
+            # Try primary account
+            if self._try_account(
+                Config.DAMADAM_USERNAME, 
+                Config.DAMADAM_PASSWORD,
+                "Primary"
+            ):
+                save_cookies(self.driver)
+                log_msg("Fresh login successful, cookies saved", "LOGIN", "OK")
+                return True
+            
+            # Try secondary account if available
+            if Config.DAMADAM_USERNAME_2 and Config.DAMADAM_PASSWORD_2:
+                if self._try_account(
+                    Config.DAMADAM_USERNAME_2,
+                    Config.DAMADAM_PASSWORD_2,
+                    "Secondary"
+                ):
+                    save_cookies(self.driver)
+                    log_msg("Fresh login successful (secondary), cookies saved", "LOGIN", "OK")
+                    return True
+            
+            return False
+        
+        except Exception as e:
+            log_msg(f"Fresh login failed: {e}", "ERROR")
+            return False
+    
+    def _try_account(self, username, password, label):
+        """Try logging in with specific account"""
+        log_msg(f"Attempting login with {label} account...", "LOGIN")
+        
+        try:
+            # Find username field
+            nick = WebDriverWait(self.driver, 8).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "#nick, input[name='nick']")
+                )
+            )
+            
+            # Find password field
+            try:
+                pw = self.driver.find_element(By.CSS_SELECTOR, "#pass, input[name='pass']")
+            except:
+                pw = WebDriverWait(self.driver, 8).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "input[type='password']")
+                    )
+                )
+            
+            # Find submit button
+            btn = self.driver.find_element(
+                By.CSS_SELECTOR, 
+                "button[type='submit'], form button"
+            )
+            
+            # Fill and submit
+            nick.clear()
+            nick.send_keys(username)
+            time.sleep(0.5)
+            
+            pw.clear()
+            pw.send_keys(password)
+            time.sleep(0.5)
+            
+            btn.click()
+            time.sleep(4)
+            
+            # Check success
+            if 'login' not in self.driver.current_url.lower():
+                log_msg(f"{label} account login successful", "LOGIN", "OK")
+                return True
+            
+            log_msg(f"{label} account login failed", "LOGIN")
+            return False
+        
+        except Exception as e:
+            log_msg(f"{label} account error: {e}", "LOGIN")
+            return False
