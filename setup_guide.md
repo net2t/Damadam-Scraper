@@ -1,367 +1,368 @@
-# DamaDam Scraper v4.0 - Complete Setup Guide
+# 🚀 DamaDam Scraper v4.0
 
-Step-by-step instructions to get the scraper running locally and on GitHub Actions
+Advanced automation bot for scraping DamaDam user profiles with dual-mode operation.
+
+## ✨ Features
+
+### 🎯 **Dual Scraping Modes**
+- **Target Mode**: Scrapes users from the "Target" sheet
+- **Online Mode**: Scrapes currently online users from https://damadam.pk/online_kon/
+
+### 📊 **Data Management**
+- Stores all profiles in a single "ProfilesTarget" sheet
+- Tracks source (Target or Online) for each profile
+- Separate "OnlineLog" sheet tracks when users are online
+- Automatic duplicate detection and profile updates
+- Change tracking with highlighted cells
+
+### 🤖 **Automation**
+- **Target Mode**: Manual trigger via GitHub Actions
+- **Online Mode**: Runs automatically every 15 minutes
+- Cookie-based session persistence
+- Intelligent retry logic
+- Rate limit handling
+
+### 🛡️ **Robust Error Handling**
+- Detects suspended accounts
+- Identifies unverified users
+- Graceful timeout handling
+- Comprehensive logging
 
 ---
 
-## 📋 Prerequisites
+## 📁 Project Structure
 
-- Windows/Linux/Mac with Python 3.9+
-- Chrome browser installed
-- DamaDam.pk account
-- Google account with Sheets access
-- GitHub account (for automation)
+```
+Damadam-Scraper_v_4.0/
+├── config.py              # Configuration & environment variables
+├── browser.py             # Browser setup & login management
+├── sheets_manager.py      # Google Sheets operations
+├── scraper_target.py      # Target mode scraper
+├── scraper_online.py      # Online mode scraper
+├── main.py                # Main entry point
+├── requirements.txt       # Python dependencies
+├── .env                   # Local environment variables (create from .env_example)
+├── .env_example           # Environment template
+├── .gitignore            
+├── README.md
+└── .github/workflows/
+    ├── scrape-target.yml  # Target mode workflow (manual)
+    └── scrape-online.yml  # Online mode workflow (every 15 min)
+```
 
 ---
 
-## 🎯 Phase 1: Local Machine Setup
+## 🔧 Setup Instructions
 
-### Step 1.1: Clone Repository
-
-```bash
-git clone https://github.com/yourname/damadam-scraper.git
-cd damadam-scraper
-```
-
-### Step 1.2: Create Virtual Environment
+### 1️⃣ **Clone Repository**
 
 ```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Mac/Linux
-python3 -m venv venv
-source venv/bin/activate
+git clone https://github.com/yourusername/Damadam-Scraper_v_4.0.git
+cd Damadam-Scraper_v_4.0
 ```
 
-### Step 1.3: Install Python Packages
+### 2️⃣ **Install Dependencies**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 1.4: Download ChromeDriver
+### 3️⃣ **Configure Environment Variables**
 
-1. Go to [ChromeDriver Downloads](https://googlechromelabs.github.io/chrome-for-testing/)
-2. Download version matching your Chrome version
-3. Extract `chromedriver.exe` to project root directory
-4. Verify: `chromedriver --version`
-
-### Step 1.5: Create Configuration File
+Copy the example file and fill in your credentials:
 
 ```bash
-# Copy template
-cp .env.example .env
-
-# Edit .env with your values
-# Windows: Open with Notepad
-notepad .env
-
-# Mac/Linux: Use nano or vi
-nano .env
+cp .env_example .env
 ```
 
-**Fill in your values:**
+Edit `.env`:
 
-```env
-DAMADAM_USERNAME=your_damadam_username
-DAMADAM_PASSWORD=your_damadam_password
-GOOGLE_SHEET_URL=your_google_sheet_url
+```bash
+# DamaDam Credentials
+DAMADAM_USERNAME=your_username
+DAMADAM_PASSWORD=your_password
+
+# Google Sheet URL
+GOOGLE_SHEET_URL=https://docs.google.com/spreadsheets/d/your_sheet_id/edit
+
+# Local development (use credentials.json file)
 GOOGLE_APPLICATION_CREDENTIALS=credentials.json
 ```
 
----
+### 4️⃣ **Setup Google Sheets**
 
-## 🔐 Phase 2: Google Service Account Setup
+1. Create a Google Sheet with these tabs:
+   - **ProfilesTarget**: Main profile data
+   - **Target**: List of users to scrape
+   - **OnlineLog**: Tracks when users are online
+   - **Dashboard**: Run statistics
+   - **Tags** (optional): Tag mappings
 
-### Step 2.1: Create Google Cloud Project
+2. Create a Google Cloud Service Account:
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select existing
+   - Enable Google Sheets API and Google Drive API
+   - Create Service Account credentials
+   - Download the JSON key file as `credentials.json`
+   - Share your Google Sheet with the service account email
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Click **"Select a Project"** > **"NEW PROJECT"**
-3. Enter name: `DamaDam Scraper`
-4. Click **CREATE**
+### 5️⃣ **Prepare Target Sheet**
 
-### Step 2.2: Enable Google Sheets API
+In the "Target" sheet, add headers:
 
-1. In left menu, click **"APIs & Services"** > **"Library"**
-2. Search for: `Google Sheets API`
-3. Click on it
-4. Click **ENABLE**
-
-### Step 2.3: Create Service Account
-
-1. Go to **"APIs & Services"** > **"Credentials"** (left menu)
-2. Click **CREATE CREDENTIALS** > **"Service Account"**
-3. Enter **Service account name**: `damadam-scraper`
-4. Click **CREATE AND CONTINUE**
-5. Click **CONTINUE** (optional roles)
-6. Click **DONE**
-
-### Step 2.4: Create Service Account Key
-
-1. In "Service Accounts" list, click the account you just created
-2. Go to **KEYS** tab
-3. Click **ADD KEY** > **Create new key**
-4. Choose **JSON** format
-5. Click **CREATE**
-6. File downloads automatically as `xxxxx.json`
-7. **Rename to `credentials.json`** and place in project root
-
-### Step 2.5: Share Google Sheet
-
-1. Open your Google Sheet
-2. Click **SHARE** button (top right)
-3. Get service account email from `credentials.json`:
-   - Open file, look for `"client_email": "xxx@yyy.iam.gserviceaccount.com"`
-4. Paste email in share dialog
-5. Click **SHARE**
-
-### Step 2.6: Verify Setup
-
-```bash
-# Test if you can read the sheet
-python -c "from sheets import authenticate_google, SheetsManager; auth = authenticate_google(); print('✅ Google Auth Works')"
-```
+| Nickname | Status | Remarks | Source |
+|----------|--------|---------|--------|
+| user123  | ⚡ Pending |  | Target |
 
 ---
 
-## 🎬 Phase 3: First Run
+## 🚀 Usage
 
-### Step 3.1: Prepare Google Sheet
+### **Local Execution**
 
-Create a Google Sheet with these worksheets:
-
-1. **Profiles** (for scraped data)
-   - Headers will auto-initialize on first run
-   - Columns: NICK NAME, TAGS, CITY, GENDER, MARRIED, AGE, JOINED, FOLLOWERS, STATUS, POSTS, INTRO, SOURCE, DATETIME SCRAP, LAST POST, LAST POST TIME, IMAGE, PROFILE LINK, POST URL
-
-2. **RunList** (for targets)
-   - Headers: Nickname, Status, Remarks, Source
-   - Add nicknames you want to scrape
-
-### Step 3.2: Test Authentication
-
+#### Run Target Mode (from Target sheet)
 ```bash
-# Test DamaDam login
-python -c "from browser import setup_browser; from auth import authenticate; d = setup_browser(); r = authenticate(d); print('✅ Login OK' if r else '❌ Login Failed'); d.quit()"
+# Scrape all pending targets
+python main.py --mode target
+
+# Scrape only 50 profiles
+python main.py --mode target --max-profiles 50
+
+# Custom batch size
+python main.py --mode target --batch-size 10
 ```
 
-### Step 3.3: Run Scraper
-
+#### Run Online Mode (from online users list)
 ```bash
-# Run with all pending targets
-python main.py
+# Scrape all online users
+python main.py --mode online
 
-# Run with limit (5 profiles only)
-python main.py --max-profiles 5
-
-# Run with custom batch size
-python main.py --batch-size 10
+# Custom batch size
+python main.py --mode online --batch-size 15
 ```
 
----
+### **GitHub Actions**
 
-## ☁️ Phase 4: GitHub Actions Setup
+#### Setup Secrets
+Go to Settings → Secrets and variables → Actions, and add:
 
-### Step 4.1: Push to GitHub
-
-```bash
-git add .
-git commit -m "Initial commit"
-git push origin main
-```
-
-**Make sure `.gitignore` includes:**
-
-```gitignore
-.env
-credentials.json
-damadam_cookies.pkl
-__pycache__/
-venv/
-```
-
-### Step 4.2: Add Secrets to GitHub
-
-1. Go to your GitHub repository
-2. Click **Settings** > **Secrets and variables** > **Actions**
-3. Click **New repository secret** and add:
-
-| Secret Name | Value |
-|---|---|
+| Secret Name | Description |
+|-------------|-------------|
 | `DAMADAM_USERNAME` | Your DamaDam username |
 | `DAMADAM_PASSWORD` | Your DamaDam password |
 | `GOOGLE_SHEET_URL` | Your Google Sheet URL |
-| `GOOGLE_CREDENTIALS_JSON` | **Raw JSON content** from credentials.json file |
+| `GOOGLE_CREDENTIALS_JSON` | Raw JSON from credentials.json (entire content) |
 
-**For GOOGLE_CREDENTIALS_JSON:**
+**⚠️ Important**: For `GOOGLE_CREDENTIALS_JSON`, open your `credentials.json` file and copy the **entire content** (including braces) into the secret field.
 
-1. Open `credentials.json` in text editor
-2. Copy entire content (all text including `{` and `}`)
-3. Paste into GitHub secret
+#### Run Workflows
 
-### Step 4.3: Enable GitHub Actions
+**Target Mode (Manual)**:
+1. Go to Actions → Target Mode Scraper
+2. Click "Run workflow"
+3. Set parameters (max profiles, batch size)
+4. Click "Run workflow"
 
-1. Go to **Actions** tab
-2. If workflow exists, you're ready
-3. If not, create `.github/workflows/scraper.yml` (use provided template)
-
-### Step 4.4: Test Workflow
-
-1. Go to **Actions** tab
-2. Select **"DamaDam Scraper"** workflow
-3. Click **Run workflow** > **Run workflow**
-4. Watch the logs as it runs
+**Online Mode (Automatic)**:
+- Runs automatically every 15 minutes
+- Can also be triggered manually from Actions → Online Mode Scraper
 
 ---
 
-## ✅ Verification Checklist
+## 📊 Google Sheets Structure
 
-- [ ] Python 3.9+ installed
-- [ ] Virtual environment created and activated
-- [ ] `requirements.txt` packages installed
-- [ ] `chromedriver.exe` in root directory
-- [ ] `.env` file created with credentials
-- [ ] `credentials.json` in root directory
-- [ ] Google Sheet created with Profiles + RunList sheets
-- [ ] Google service account email added to sheet share
-- [ ] Local first run successful
-- [ ] GitHub secrets configured
-- [ ] GitHub workflow triggered successfully
+### **ProfilesTarget Sheet**
+
+| Column | Description |
+|--------|-------------|
+| NICK NAME | Username |
+| TAGS | User tags (from Tags sheet) |
+| CITY | User's city |
+| GENDER | Male/Female |
+| MARRIED | Yes/No |
+| AGE | User age |
+| JOINED | Join date |
+| FOLLOWERS | Follower count |
+| STATUS | Normal/Banned/Unverified |
+| POSTS | Post count |
+| INTRO | User bio |
+| SOURCE | Target/Online |
+| DATETIME SCRAP | When scraped |
+| LAST POST | Most recent post URL |
+| LAST POST TIME | When last posted |
+| IMAGE | Profile image URL |
+| PROFILE LINK | User profile URL |
+| POST URL | User posts page URL |
+
+### **OnlineLog Sheet**
+
+Tracks when users are seen online:
+
+| Date Time | Nickname | Last Seen |
+|-----------|----------|-----------|
+| 15-Dec-24 06:30 PM | user123 | 15-Dec-24 06:30 PM |
+
+### **Target Sheet**
+
+Manages scraping queue:
+
+| Nickname | Status | Remarks | Source |
+|----------|--------|---------|--------|
+| user123 | ⚡ Pending | | Target |
+| user456 | Done 💀 | updated @ 02:30 PM | Target |
+| user789 | Error 💥 | Unverified user | Target |
+
+**Status Values**:
+- `⚡ Pending`: Waiting to be scraped
+- `Done 💀`: Successfully scraped
+- `Error 💥`: Error occurred (see Remarks)
 
 ---
 
-## 🧪 Testing Commands
+## ⚙️ Configuration
 
-```bash
-# Test Python environment
-python --version
+### **Environment Variables**
 
-# Test imports
-python -c "import selenium, gspread, rich; print('✅ All imports OK')"
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_PROFILES_PER_RUN` | 0 | Max profiles to scrape (0 = all) |
+| `BATCH_SIZE` | 20 | Profiles per batch |
+| `MIN_DELAY` | 0.3 | Min delay between requests (seconds) |
+| `MAX_DELAY` | 0.5 | Max delay between requests (seconds) |
+| `PAGE_LOAD_TIMEOUT` | 30 | Page load timeout (seconds) |
+| `SHEET_WRITE_DELAY` | 1.0 | Delay after sheet writes (seconds) |
+| `ONLINE_MODE_DELAY` | 900 | Online mode run interval (15 min) |
 
-# Test Google auth
-python -c "from sheets import authenticate_google; c = authenticate_google(); print('✅ Google auth works')"
+---
 
-# Test browser
-python -c "from browser import setup_browser; d = setup_browser(); print(f'✅ Browser OK: {d.current_url}'); d.quit()"
+## 🐛 Troubleshooting
 
-# Test DamaDam login
-python main.py --max-profiles 1
+### **Issue: GitHub Secrets Not Working**
+
+**Problem**: Scraper uses default values instead of secrets
+
+**Solution**:
+1. Verify secrets are set in repository Settings → Secrets
+2. Check secret names match exactly (case-sensitive)
+3. For `GOOGLE_CREDENTIALS_JSON`, ensure you copied the entire JSON content
+4. Check workflow file uses correct secret names
+
+### **Issue: Invalid JSON Error**
+
+```
+Error: Invalid JSON in credentials: Expecting property name...
 ```
 
----
+**Solution**:
+1. Open your `credentials.json` file
+2. Copy **entire content** starting from `{` to `}`
+3. Paste into GitHub Secret `GOOGLE_CREDENTIALS_JSON`
+4. Do not modify or format the JSON
 
-## 🐛 Common Issues & Solutions
+### **Issue: Login Failed**
 
-### Issue: "ModuleNotFoundError: No module named 'selenium'"
+**Solution**:
+1. Verify credentials in `.env` or GitHub Secrets
+2. Try logging in manually to check account status
+3. Check if account requires 2FA (not supported)
+4. Add secondary account credentials as backup
 
-**Solution:** Install requirements: `pip install -r requirements.txt`
+### **Issue: Permission Denied on Google Sheets**
 
-### Issue: "chromedriver: command not found"
+**Solution**:
+1. Open your Google Sheet
+2. Click "Share" button
+3. Add service account email (from credentials.json)
+4. Give "Editor" permissions
 
-**Solution:**
+### **Issue: No Online Users Found**
 
-- Download ChromeDriver matching your Chrome version
-- Place in project root directory
-- On Mac/Linux, make executable: `chmod +x chromedriver`
-
-### Issue: "DAMADAM_USERNAME not set"
-
-**Solution:** Check `.env` file has correct credentials
-
-### Issue: "Google credentials not found"
-
-**Solution:**
-
-- Download credentials.json from Google Cloud Console
-- Place in project root
-- Verify service account has access to sheet
-
-### Issue: "Profile not found" (404 error)
-
-**Solution:**
-
-- Check nickname spelling in RunList
-- Verify profile exists on DamaDam.pk
-
-### Issue: GitHub Actions workflow fails
-
-**Solution:**
-
-- Check GitHub secrets are correctly added
-- Verify Google Sheets URL is correct
-- Check DamaDam credentials are correct
+**Solution**:
+1. Check https://damadam.pk/online_kon/ manually
+2. Verify page structure hasn't changed
+3. Check browser console for errors
+4. Increase `PAGE_LOAD_TIMEOUT`
 
 ---
 
-## 📊 Next Steps
+## 🔐 Security
 
-Once working:
-
-1. **Add more targets** to RunList sheet
-
-2. **Schedule automation** (workflow runs every 6 hours by default)
-
-3. **Monitor progress** in Profiles sheet
-
-4. **Track duplicates** via cell notes
-
-5. **Adjust settings** for your needs
+- **Never commit** `.env` or `credentials.json` to version control
+- Store sensitive data in GitHub Secrets
+- Rotate credentials regularly
+- Use separate accounts for automation
 
 ---
 
-## 🔄 Architecture Overview
+## 📝 Workflow Details
 
-```text
-.env + credentials.json
-         ↓
-    config.py (load settings)
-         ↓
-    ┌─────────────────────────────────────────────┐
-    │              main.py (orchestration)          │
-    ├──────────┬──────────┬──────────┬────────────┤
-    ↓          ↓          ↓          ↓            ↓
- browser.py  auth.py   sheets.py  scraper.py  logger.py
-    ↓          ↓          ↓          ↓            ↓
- Chrome     Login      Google      Profile    Console
- Driver             Sheets API     Data       Output
-    ↓                    ↓
- damadam.pk     Google Sheets
-              (Profiles + RunList)
-```
+### **Target Mode**
+- Triggered: Manual
+- Reads from: "Target" sheet
+- Processes: Users with "⚡ Pending" status
+- Updates: Status to "Done 💀" or "Error 💥"
+- Writes to: "ProfilesTarget" sheet with SOURCE="Target"
+
+### **Online Mode**
+- Triggered: Every 15 minutes (automatic)
+- Reads from: https://damadam.pk/online_kon/
+- Logs to: "OnlineLog" sheet
+- Writes to: "ProfilesTarget" sheet with SOURCE="Online"
+- No status updates in "Target" sheet
 
 ---
 
-## 📚 Documentation Files
+## 📈 Dashboard Metrics
 
-- **README.md** - Full feature documentation
-
-- **config.py** - Configuration reference
-
-- **SETUP_GUIDE.md** - This file (step-by-step)
-
----
-
-## 💡 Pro Tips
-
-1. **First Login Takes Time**: Chrome starts fresh, so first run may take longer
-
-2. **Cookies Speed Things Up**: After first login, subsequent runs reuse cookies
-
-3. **Batch Sizes Matter**: Smaller batches = safer but slower
-
-4. **Test with Small Runs**: Use `--max-profiles 1` to test
-
-5. **Monitor Rate Limits**: If hitting limits, increase MIN_DELAY and MAX_DELAY
+The Dashboard sheet tracks:
+- Run number
+- Timestamp
+- Profiles processed
+- Success/failure counts
+- New/updated/unchanged profiles
+- Trigger type (scheduled/manual)
+- Start/end times
 
 ---
 
-## Ready to scrape? 🚀
+## 🤝 Contributing
 
-```bash
-python main.py
-```
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open Pull Request
 
-Good luck! 💪
+---
+
+## 📄 License
+
+This project is for educational purposes only. Respect website terms of service and robots.txt.
+
+---
+
+## 🆘 Support
+
+For issues or questions:
+1. Check troubleshooting section above
+2. Review GitHub Actions logs
+3. Open an issue with detailed error logs
+4. Contact repository maintainer
+
+---
+
+## 🎯 Roadmap
+
+- [ ] Add proxy support
+- [ ] Implement email notifications
+- [ ] Add profile image downloading
+- [ ] Support for private profiles
+- [ ] Export to CSV/Excel
+- [ ] Advanced filtering options
+- [ ] Web dashboard for monitoring
+
+---
+
+**Version**: 4.0  
+**Last Updated**: December 2024  
+**Author**: Your Name
