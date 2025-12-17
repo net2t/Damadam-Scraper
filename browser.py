@@ -26,8 +26,11 @@ def get_pkt_time():
 def log_msg(msg, level="INFO"):
     """Simple logger with timestamp"""
     ts = get_pkt_time().strftime('%H:%M:%S')
-    prefix = f"[{level}]" if level else ""
-    print(f"[{ts}] {prefix} {msg}")
+    # Handle both log_msg("text") and log_msg("text", "LEVEL")
+    if level and level != "INFO":
+        print(f"[{ts}] [{level}] {msg}")
+    else:
+        print(f"[{ts}] [INFO] {msg}")
     import sys
     sys.stdout.flush()
 
@@ -186,7 +189,7 @@ class LoginManager:
                 "Primary"
             ):
                 save_cookies(self.driver)
-                log_msg("Fresh login successful, cookies saved", "LOGIN", "OK")
+                log_msg("[OK] Fresh login successful, cookies saved", "LOGIN")
                 return True
             
             # Try secondary account if available
@@ -197,7 +200,7 @@ class LoginManager:
                     "Secondary"
                 ):
                     save_cookies(self.driver)
-                    log_msg("Fresh login successful (secondary), cookies saved", "LOGIN", "OK")
+                    log_msg("[OK] Fresh login successful (secondary), cookies saved", "LOGIN")
                     return True
             
             return False
@@ -248,7 +251,7 @@ class LoginManager:
             
             # Check success
             if 'login' not in self.driver.current_url.lower():
-                log_msg(f"{label} account login successful", "LOGIN", "OK")
+                log_msg(f"[OK] {label} account login successful", "LOGIN")
                 return True
             
             log_msg(f"{label} account login failed", "LOGIN")
