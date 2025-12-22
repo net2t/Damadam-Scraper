@@ -4,6 +4,8 @@ Target Mode Scraper - Scrapes users from Target sheet
 
 import time
 import re
+import random
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from selenium.webdriver.common.by import By
@@ -13,6 +15,13 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from config import Config
 from browser import get_pkt_time, log_msg
+from contracts import (
+    SCRAPE_STATUS_ERROR,
+    SCRAPE_STATUS_SKIPPED,
+    SCRAPE_STATUS_SUCCESS,
+    ScrapeResult,
+    create_stats_snapshot,
+)
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -24,36 +33,100 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 def convert_relative_date(text):
-    """Convert 'X ago' to absolute date"""
-    if not text:
+    """Convert relative dates to consistent format: dd-mmm-yy hh:mm a
+    
+    Handles multiple formats:
+    - Relative times: "5 mins ago", "2 hours ago", "1 day ago"
+    - Absolute dates: "22-Dec-25 04:53 PM", "22-Dec-25 16:53", "22-12-2025 16:53"
+    - Date only: "22-Dec-25"
+    - Time only: "04:53 PM" (assumes today)
+    """
+    if not text or not str(text).strip():
         return ""
     
-    t = text.lower().strip().replace("mins", "minutes").replace("min", "minute")
-    t = t.replace("secs", "seconds").replace("sec", "second")
-    t = t.replace("hrs", "hours").replace("hr", "hour")
+    text = str(text).strip().lower()
+    now = get_pkt_time()
     
-    match = re.search(r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago", t)
-    if not match:
-        return text
+    # Handle empty or invalid input
+    if not text or text in ['-', 'n/a', 'none', 'null']:
+        return now.strftime("%d-%b-%y %I:%M %p").lower()
     
-    amount = int(match.group(1))
-    unit = match.group(2)
+    # Clean and standardize the input text
+    t = text.replace('\n', ' ').replace('\t', ' ').replace('\r', '').strip()
+    t = re.sub(r'\s+', ' ', t)  # Normalize multiple spaces
     
-    seconds_map = {
-        "second": 1,
-        "minute": 60,
-        "hour": 3600,
-        "day": 86400,
-        "week": 604800,
-        "month": 2592000,
-        "year": 31536000
-    }
+    # Handle "X ago" format
+    ago_match = re.search(r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago", t)
+    if ago_match:
+        amount = int(ago_match.group(1))
+        unit = ago_match.group(2)
+        
+        # Map units to seconds
+        seconds_map = {
+            "second": 1,
+            "minute": 60,
+            "hour": 3600,
+            "day": 86400,
+            "week": 604800,
+            "month": 2592000,
+            "year": 31536000
+        }
+        
+        if unit in seconds_map:
+            dt = now - timedelta(seconds=amount * seconds_map[unit])
+            return dt.strftime("%d-%b-%y %I:%M %p").lower()
     
-    if unit in seconds_map:
-        dt = get_pkt_time() - timedelta(seconds=amount * seconds_map[unit])
-        return dt.strftime("%d-%b-%y")
+    # Try parsing as absolute date
+    date_formats = [
+        # Full date and time formats
+        "%d-%b-%y %I:%M %p",  # 22-Dec-25 04:53 PM
+        "%d-%b-%y %H:%M",     # 22-Dec-25 16:53
+        "%d-%m-%y %H:%M",     # 22-12-25 16:53
+        "%d-%m-%Y %H:%M",     # 22-12-2025 16:53
+        "%d-%b-%y %I:%M%p",   # 22-Dec-25 04:53PM
+        "%d-%b-%y %H:%M:%S",  # 22-Dec-25 16:53:00
+        "%Y-%m-%d %H:%M:%S",  # 2025-12-22 16:53:00
+        # Date only formats
+        "%d-%b-%y",           # 22-Dec-25
+        "%d-%m-%y",           # 22-12-25
+        "%Y-%m-%d",           # 2025-12-22
+        # Time only formats (assume today)
+        "%I:%M %p",           # 04:53 PM
+        "%H:%M"               # 16:53
+    ]
     
-    return text
+    for fmt in date_formats:
+        try:
+            dt = datetime.strptime(t, fmt)
+            
+            # If time not in format, use current time
+            if ':' not in fmt:
+                dt = dt.replace(
+                    hour=now.hour,
+                    minute=now.minute,
+                    second=0,
+                    microsecond=0
+                )
+            # If date not in format, use today's date
+            elif '%d' not in fmt or '%m' not in fmt or ('%y' not in fmt and '%Y' not in fmt):
+                dt = dt.replace(
+                    year=now.year,
+                    month=now.month,
+                    day=now.day
+                )
+                
+            # Handle 2-digit years
+            if dt.year > now.year + 1:  # If year is in the future, assume it's 1900s
+                dt = dt.replace(year=dt.year - 100)
+                
+            return dt.strftime("%d-%b-%y %I:%M %p").lower()
+            
+        except ValueError:
+            continue
+    
+    # If no format matches, log warning and return current time
+    log_msg(f"Could not parse date: '{text}'. Using current time.", "WARNING")
+    return now.strftime("%d-%b-%y %I:%M %p").lower()
 
 def detect_suspension(page_source):
     """Detect account suspension"""
@@ -74,42 +147,176 @@ class ProfileScraper:
     def __init__(self, driver):
         self.driver = driver
     
-    def scrape_profile(self, nickname, source="Target"):
-        """Scrape complete profile data"""
+    def _extract_mehfil_details(self, page_source):
+        """Extract mehfil details from profile page"""
+        mehfil_data = {
+            'MEH NAME': [],
+            'MEH TYPE': [],
+            'MEH LINK': [],
+            'MEH DATE': []
+        }
+        
+        try:
+            # Find all mehfil entries
+            mehfil_entries = self.driver.find_elements(
+                By.CSS_SELECTOR, 
+                "div.mbl.mtl a[href*='/mehfil/public/']"
+            )
+            
+            for entry in mehfil_entries:
+                try:
+                    # Extract mehfil name
+                    name_elem = entry.find_element(By.CSS_SELECTOR, "div.ow")
+                    mehfil_data['MEH NAME'].append(clean_text(name_elem.text))
+                    
+                    # Extract mehfil types
+                    type_elems = entry.find_elements(
+                        By.CSS_SELECTOR, 
+                        "div[style*='background:#f8f7f9']"
+                    )
+                    types = [clean_text(t.text) for t in type_elems]
+                    mehfil_data['MEH TYPE'].append(", ".join(types))
+                    
+                    # Extract mehfil link
+                    link = entry.get_attribute('href')
+                    mehfil_data['MEH LINK'].append(link)
+                    
+                    # Extract join date
+                    date_elem = entry.find_element(
+                        By.CSS_SELECTOR, 
+                        "div.cs.sp"
+                    )
+                    date_text = clean_text(date_elem.text)
+                    if 'since' in date_text.lower():
+                        date_text = date_text.split('since')[-1].strip()
+                    mehfil_data['MEH DATE'].append(convert_relative_date(date_text))
+                    
+                except Exception as e:
+                    log_msg(f"Error extracting mehfil entry: {e}", "WARNING")
+                    continue
+                    
+        except Exception as e:
+            log_msg(f"Error finding mehfil section: {e}", "WARNING")
+            
+        return mehfil_data
+        
+    def _extract_friend_status(self, page_source):
+        """Extract friend status from follow button"""
+        try:
+            button = self.driver.find_element(By.XPATH, "//form[contains(@action, '/follow/')]/button")
+            label = button.text.strip().upper()
+            if "UNFOLLOW" in label:
+                return "Yes"
+            if "FOLLOW" in label:
+                return "No"
+        except Exception:
+            pass
+
+        if 'action="/follow/remove/' in page_source:
+            return "Yes"
+        if 'action="/follow/add/' in page_source:
+            return "No"
+        return ""
+    
+    def _extract_rank(self, page_source):
+        """Extract rank label and star image URL"""
+        try:
+            match = re.search(r'src=\"(/static/img/stars/[^\"]+)\"', page_source)
+            if not match:
+                return "", ""
+
+            rel_path = match.group(1)
+            image_url = rel_path if rel_path.startswith('http') else f"https://damadam.pk{rel_path}"
+
+            lower = rel_path.lower()
+            if "red" in lower:
+                label = "Red Star"
+            elif "gold" in lower:
+                label = "Gold Star"
+            elif "silver" in lower:
+                label = "Silver Star"
+            else:
+                label = Path(rel_path).stem.replace('-', ' ').title()
+
+            return label, image_url
+
+        except Exception as e:
+            log_msg(f"Rank extraction failed: {e}", "WARNING")
+            return "", ""
+    
+    def _extract_user_id(self, page_source):
+        """Extract user ID from hidden input field"""
+        try:
+            # Look for <input type="hidden" name="tid" value="3405367">
+            match = re.search(r'name=["\']tid["\']\s+value=["\'](\d+)["\']', page_source)
+            if match:
+                return match.group(1)
+                
+            # Alternative: Look for it in follow form
+            match = re.search(r'name=["\']pl["\']\s+value=["\']\*\*\*\d+\*(\d+)\*', page_source)
+            if match:
+                return match.group(1)
+                
+        except Exception as e:
+            log_msg(f"Error extracting user ID: {e}", "WARNING")
+            
+        return ""
+    
+    def scrape_profile(self, nickname, source="Target") -> ScrapeResult:
+        """Scrape complete profile data returning a ScrapeResult"""
+        if not nickname or not isinstance(nickname, str) or not nickname.strip():
+            log_msg(f"Invalid nickname provided: {nickname}", "ERROR")
+            return ScrapeResult(status=SCRAPE_STATUS_ERROR, error="invalid_nickname")
+            
+        nickname = nickname.strip()
         url = f"https://damadam.pk/users/{nickname}/"
         
         try:
             log_msg(f"Scraping: {nickname}", "SCRAPING")
             
             self.driver.get(url)
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "h1.cxl.clb.lsp"))
+            WebDriverWait(self.driver, 12).until(
+                EC.presence_of_element_located((By.XPATH, "//h1"))
             )
-            
+
             page_source = self.driver.page_source
             now = get_pkt_time()
             
-            # Initialize profile data
-            data = {
+            # Initialize profile data with default values
+            data = {col: Config.DEFAULT_VALUES.get(col, "") for col in Config.COLUMN_ORDER}
+            
+            # Ensure nickname is set in the data
+            data["NICK NAME"] = nickname
+            
+            # Extract additional data
+            mehfil_data = self._extract_mehfil_details(page_source)
+            friend_status = self._extract_friend_status(page_source)
+            _, rank_image = self._extract_rank(page_source)
+            user_id = self._extract_user_id(page_source)
+
+            # Update data with all fields
+            data.update({
+                "ID": user_id,
                 "NICK NAME": nickname,
-                "TAGS": "",
-                "CITY": "",
-                "GENDER": "",
-                "MARRIED": "",
-                "AGE": "",
-                "JOINED": "",
                 "FOLLOWERS": "",
                 "STATUS": "Normal",
                 "POSTS": "",
                 "INTRO": "",
                 "SOURCE": source,
+                "FRIEND": friend_status,
+                "FRD": friend_status,
                 "DATETIME SCRAP": now.strftime("%d-%b-%y %I:%M %p"),
-                "LAST POST": "",
                 "LAST POST TIME": "",
+                "LAST POST LINK": "",
                 "IMAGE": "",
                 "PROFILE LINK": url.rstrip('/'),
                 "POST URL": f"https://damadam.pk/profile/public/{nickname}",
-            }
+                "RURL": rank_image,
+                "MEH NAME": "\n".join(mehfil_data['MEH NAME']) if mehfil_data['MEH NAME'] else "",
+                "MEH TYPE": "\n".join(mehfil_data['MEH TYPE']) if mehfil_data['MEH TYPE'] else "",
+                "MEH LINK": "\n".join(mehfil_data['MEH LINK']) if mehfil_data['MEH LINK'] else "",
+                "MEH DATE": "\n".join(mehfil_data['MEH DATE']) if mehfil_data['MEH DATE'] else ""
+            })
             
             # Check suspension
             suspend_reason = detect_suspension(page_source)
@@ -117,12 +324,20 @@ class ProfileScraper:
                 data['STATUS'] = 'Banned'
                 data['INTRO'] = "Account Suspended"[:250]
                 data['__skip_reason'] = 'Account Suspended'
-                return data
+                return ScrapeResult(
+                    status=SCRAPE_STATUS_SKIPPED,
+                    data=data,
+                    skip_reason='Account Suspended'
+                )
             
             if 'account suspended' in page_source.lower():
                 data['STATUS'] = 'Banned'
                 data['__skip_reason'] = 'Account Suspended'
-                return data
+                return ScrapeResult(
+                    status=SCRAPE_STATUS_SKIPPED,
+                    data=data,
+                    skip_reason='Account Suspended'
+                )
             
             # Check unverified
             if (
@@ -132,264 +347,182 @@ class ProfileScraper:
             ):
                 data['STATUS'] = 'Unverified'
                 data['__skip_reason'] = 'Unverified user'
-                return data
+            else:
+                data['STATUS'] = 'Verified'
             
-            # Extract intro
-            for sel in ["span.cl.sp.lsp.nos", "span.cl", ".ow span.nos"]:
-                try:
-                    intro = self.driver.find_element(By.CSS_SELECTOR, sel)
-                    if intro.text.strip():
-                        data['INTRO'] = clean_text(intro.text)
-                        break
-                except:
-                    pass
-            
-            # Extract profile fields
-            fields = {
-                'City:': 'CITY',
-                'Gender:': 'GENDER',
-                'Married:': 'MARRIED',
-                'Age:': 'AGE',
-                'Joined:': 'JOINED'
-            }
-            
-            for label, key in fields.items():
-                try:
-                    elem = self.driver.find_element(
-                        By.XPATH,
-                        f"//b[contains(text(), '{label}')]/following-sibling::span[1]"
-                    )
-                    value = elem.text.strip()
-                    
-                    if not value:
-                        continue
-                    
-                    if key == 'JOINED':
-                        data[key] = convert_relative_date(value)
-                    elif key == 'GENDER':
-                        low = value.lower()
-                        if 'female' in low:
-                            data[key] = 'Female'
-                        elif 'male' in low:
-                            data[key] = 'Male'
-                    elif key == 'MARRIED':
-                        low = value.lower()
-                        if low in {'yes', 'married'}:
-                            data[key] = 'Yes'
-                        elif low in {'no', 'single', 'unmarried'}:
-                            data[key] = 'No'
-                    else:
-                        data[key] = clean_text(value)
-                
-                except:
-                    continue
-            
-            # Extract followers
-            for sel in ["span.cl.sp.clb", ".cl.sp.clb"]:
-                try:
-                    followers = self.driver.find_element(By.CSS_SELECTOR, sel)
-                    match = re.search(r'(\d+)', followers.text)
-                    if match:
-                        data['FOLLOWERS'] = match.group(1)
-                        break
-                except:
-                    pass
-            
-            # Extract posts count
-            for sel in [
-                "a[href*='/profile/public/'] button div:first-child",
-                "a[href*='/profile/public/'] button div"
-            ]:
-                try:
-                    posts = self.driver.find_element(By.CSS_SELECTOR, sel)
-                    match = re.search(r'(\d+)', posts.text)
-                    if match:
-                        data['POSTS'] = match.group(1)
-                        break
-                except:
-                    pass
-            
-            # Extract profile image
-            for sel in [
-                "img[src*='avatar-imgs']",
-                "img[src*='avatar']",
-                "div[style*='whitesmoke'] img[src*='cloudfront.net']"
-            ]:
-                try:
-                    img = self.driver.find_element(By.CSS_SELECTOR, sel)
-                    src = img.get_attribute('src')
-                    if src and ('avatar' in src or 'cloudfront.net' in src):
-                        data['IMAGE'] = src.replace('/thumbnail/', '/')
-                        break
-                except:
-                    pass
-            
-            # Get recent post if available
-            if data.get('POSTS') and data['POSTS'] != '0':
-                time.sleep(1)
-                post_data = self._scrape_recent_post(nickname)
-                data['LAST POST'] = post_data.get('url', '')
-                data['LAST POST TIME'] = post_data.get('time', '')
-            
-            log_msg(
-                f"Extracted: Gender={data['GENDER']}, City={data['CITY']}, "
-                f"Posts={data['POSTS']}, Status={data['STATUS']}",
-                "OK"
-            )
-            
-            return data
-        
-        except TimeoutException:
-            log_msg(f"Timeout while scraping {nickname}", "TIMEOUT")
-            return None
-        
-        except WebDriverException as e:
-            log_msg(f"Browser error while scraping {nickname}: {e}", "BROWSER_ERROR")
-            return None
-        
-        except Exception as e:
-            log_msg(f"Error scraping {nickname}: {str(e)[:60]}", "ERROR")
-            return None
-    
-    def _scrape_recent_post(self, nickname):
-        """Scrape most recent post"""
-        post_url = f"https://damadam.pk/profile/public/{nickname}"
-        
-        try:
-            self.driver.get(post_url)
-            
-            try:
-                WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "article.mbl"))
-                )
-            except TimeoutException:
-                return {'url': '', 'time': ''}
-            
-            recent_post = self.driver.find_element(By.CSS_SELECTOR, "article.mbl")
-            result = {'url': '', 'time': ''}
-            
-            # Get post URL
-            url_selectors = [
-                ("a[href*='/content/']", lambda h: h),
-                ("a[href*='/comments/text/']", lambda h: h),
-                ("a[href*='/comments/image/']", lambda h: h)
+            # Extract intro / bio text under "Intro" label
+            intro_xpaths = [
+                "//b[contains(normalize-space(.), 'Intro')]/following-sibling::span[1]",
+                "//span[contains(@class,'nos')]"
             ]
-            
-            for selector, formatter in url_selectors:
+            intro_text = ""
+            for xp in intro_xpaths:
                 try:
-                    link = recent_post.find_element(By.CSS_SELECTOR, selector)
-                    href = link.get_attribute('href')
-                    if href:
-                        result['url'] = formatter(href)
+                    intro_elem = self.driver.find_element(By.XPATH, xp)
+                    intro_text = clean_text(intro_elem.text.strip())
+                    if intro_text:
                         break
                 except:
                     continue
             
-            # Get post timestamp
-            time_selectors = [
-                "span[itemprop='datePublished']",
-                "time[itemprop='datePublished']",
-                "span.cxs.cgy",
-                "time"
-            ]
-            
-            for sel in time_selectors:
-                try:
-                    time_elem = recent_post.find_element(By.CSS_SELECTOR, sel)
-                    if time_elem.text.strip():
-                        result['time'] = convert_relative_date(time_elem.text.strip())
-                        break
-                except:
-                    continue
-            
-            return result
-        
-        except Exception:
-            return {'url': '', 'time': ''}
+            # Store intro in INTRO field
+            data['INTRO'] = intro_text
+            # TAGS will be populated from the Tags sheet in the write_profile method
 
-# ==================== TARGET MODE RUNNER ====================
+            # Extract profile fields using multiple selector patterns
+            field_selectors = [
+                # Pattern 1: <b>Label:</b> <span>Value</span>
+                ("//b[contains(normalize-space(.), '{}:')]/following-sibling::span[1]", 
+                 lambda e: e.text.strip() if e else None),
+                
+                # Pattern 2: <div><b>Label:</b> Value</div>
+                ("//div[contains(., '{}:') and not(contains(., '<img'))]",
+                 lambda e: e.text.split(':', 1)[1].strip() if e and ':' in e.text else None),
+                
+                # Pattern 3: <span class="label">Label:</span> <span>Value</span>
+                ("//span[contains(@class, 'label') and contains(., '{}:')]/following-sibling::span[1]",
+                 lambda e: e.text.strip() if e else None)
+            ]
+            
+            # Define fields to extract with their processing logic
+            fields = [
+                ('City', 'CITY', lambda x: clean_text(x) if x else ''),
+                ('Gender', 'GENDER', lambda x: 'Female' if x and 'female' in x.lower() 
+                                             else 'Male' if x and 'male' in x.lower() 
+                                             else ''),
+                ('Married', 'MARRIED', 
+                 lambda x: 'Yes' if x and x.lower() in {'yes', 'married'} 
+                              else 'No' if x and x.lower() in {'no', 'single', 'unmarried'}
+                              else ''),
+                ('Age', 'AGE', lambda x: clean_text(x) if x else ''),
+                ('Joined', 'JOINED', lambda x: convert_relative_date(x) if x else '')
+            ]
+            
+            # Try each field with all selector patterns until we find a match
+            for label, key, process_func in fields:
+                value = None
+                for selector_pattern, extract_func in field_selectors:
+                    try:
+                        xpath = selector_pattern.format(label)
+
+def validate_nickname(nickname):
+    """Validate nickname format and return cleaned version"""
+    if not nickname or not isinstance(nickname, str):
+        return None
+        
+    # Clean and validate nickname
+    nickname = nickname.strip()
+    if not nickname or len(nickname) > 50 or not re.match(r'^[\w\.\-_]+$', nickname):
+        return None
+    return nickname
+
 
 def run_target_mode(driver, sheets, max_profiles=0):
-    """Run scraper in Target mode"""
-    log_msg("=== TARGET MODE STARTED ===")
+    """Run scraper in Target mode
     
+    Args:
+        driver: WebDriver instance
+        sheets: SheetsManager instance
+        max_profiles: Maximum number of profiles to process (0 for unlimited)
+        
+    Returns:
+        dict: Statistics about the scraping operation
+    """
+    log_msg("=== TARGET MODE STARTED ===")
+    stats = create_stats_snapshot()
+    stats["invalid_nicknames"] = 0
+    stats["error"] = 0
+
     # Get pending targets
-    targets = sheets.get_pending_targets()
+    try:
+        targets = sheets.get_pending_targets()
+    except Exception as e:
+        log_msg(f"Error getting pending targets: {e}", "ERROR")
+        stats["error"] = str(e)
+        return stats
     
     if not targets:
         log_msg("No pending targets found")
-        return {
-            "success": 0,
-            "failed": 0,
-            "new": 0,
-            "updated": 0,
-            "unchanged": 0
-        }
+        return stats
+    
+    # Sort profiles by date
+    try:
+        sheets.sort_profiles_by_date()
+    except Exception as e:
+        log_msg(f"Error sorting profiles: {e}", "ERROR")
+        stats["error"] = f"Sorting error: {str(e)}"
+        return stats
     
     # Limit targets if specified
     if max_profiles > 0:
         targets = targets[:max_profiles]
-    
-    log_msg(f"Processing {len(targets)} targets...")
-    
+
+    stats["total_found"] = len(targets)
+    log_msg(f"Processing {len(targets)} target(s)...")
+
     scraper = ProfileScraper(driver)
-    stats = {"success": 0, "failed": 0, "new": 0, "updated": 0, "unchanged": 0}
-    
+    stats["start_time"] = get_pkt_time().strftime("%Y-%m-%d %H:%M:%S")
+
     for i, target in enumerate(targets, 1):
-        nickname = target['nickname']
-        row = target['row']
-        source = target.get('source', 'Target')
-        
-        log_msg(f"[{i}/{len(targets)}] Processing: {nickname}")
-        
         try:
-            # Scrape profile
-            profile = scraper.scrape_profile(nickname, source)
-            
-            if not profile:
-                sheets.update_target_status(
-                    row, "Pending", 
-                    f"Scrape failed @ {get_pkt_time().strftime('%I:%M %p')}"
-                )
-                stats['failed'] += 1
+            # Validate and clean nickname
+            nickname = validate_nickname(target.get('nickname', '').strip())
+            if not nickname:
+                log_msg(f"Skipping invalid nickname: {target.get('nickname', '')}", "WARNING")
+                stats["invalid_nicknames"] += 1
+                stats["skipped"] += 1
                 continue
-            
-            # Check skip reason
-            skip_reason = profile.get('__skip_reason')
-            if skip_reason:
-                sheets.write_profile(profile)
-                sheets.update_target_status(
-                    row, "Error",
-                    f"{skip_reason} @ {get_pkt_time().strftime('%I:%M %p')}"
-                )
-                stats['failed'] += 1
-            else:
-                # Write profile
-                result = sheets.write_profile(profile)
-                status = result.get("status", "error")
                 
-                if status in {"new", "updated", "unchanged"}:
-                    stats['success'] += 1
-                    stats[status] += 1
-                    sheets.update_target_status(
-                        row, "Done",
-                        f"{status} @ {get_pkt_time().strftime('%I:%M %p')}"
-                    )
-                else:
-                    raise RuntimeError(result.get("error", "Write failed"))
-        
+            row = target.get('row')
+            if not row:
+                log_msg(f"Missing row number for {nickname}", "ERROR")
+                stats["failed"] += 1
+                stats["processed"] += 1
+                continue
+                
+            log_msg(f"Processing {i}/{len(targets)}: {nickname}")
+            
+            # Scrape profile data
+            result = scraper.scrape_profile(nickname)
+            if result.status == SCRAPE_STATUS_ERROR:
+                stats["failed"] += 1
+                stats["processed"] += 1
+                sheets.update_runlist_status(row, "Failed", result.error or "Profile not found or error occurred")
+                continue
+
+            data = result.data or {}
+            data['SCRAPE_TIME'] = get_pkt_time().strftime("%Y-%m-%d %H:%M:%S")
+            data['SOURCE'] = 'Target'
+
+            if result.status == SCRAPE_STATUS_SKIPPED:
+                stats["skipped"] += 1
+                stats["processed"] += 1
+                sheets.write_profile(data)
+                sheets.update_runlist_status(row, "Error", result.skip_reason or "Skipped")
+                continue
+
+            existing = sheets.get_profile(nickname)
+            if existing:
+                sheets.update_profile(existing, data)
+                stats["updated"] += 1
+            else:
+                sheets.create_profile(data)
+                stats["new"] += 1
+            stats["success"] += 1
+            stats["processed"] += 1
+            sheets.update_runlist_status(row, "Completed", "Profile updated" if existing else "New profile created")
+            
         except Exception as e:
-            log_msg(f"Error processing {nickname}: {e}", "ERROR")
-            sheets.update_target_status(
-                row, "Pending",
-                f"Error: {str(e)[:50]}"
-            )
-            stats['failed'] += 1
-        
-        # Delay between profiles
-        time.sleep(Config.MIN_DELAY)
-    
-    log_msg("=== TARGET MODE COMPLETED ===")
-    log_msg(f"Results: {stats['success']} success, {stats['failed']} failed")
-    
+            log_msg(f"Error processing {nickname}: {str(e)}", "ERROR")
+            stats["failed"] += 1
+            stats["processed"] += 1
+            try:
+                sheets.update_runlist_status(row, "Error", f"Processing error: {str(e)[:100]}")
+            except:
+                log_msg("Failed to update runlist status", "ERROR")
+            
+        # Add delay between requests
+        if i < len(targets):
+            time.sleep(random.uniform(2, 5))
+            
     return stats

@@ -283,6 +283,32 @@ class SheetsManager:
             
             return {"status": "new", "changed_fields": list(Config.COLUMN_ORDER)}
     
+    def get_profile(self, nickname):
+        """Fetch existing profile data by nickname"""
+        if not nickname:
+            return None
+        record = self.existing_profiles.get(nickname.strip().lower())
+        if not record:
+            return None
+        data = record['data']
+        profile_dict = {}
+        for idx, col in enumerate(Config.COLUMN_ORDER):
+            value = data[idx] if idx < len(data) else ""
+            profile_dict[col] = value
+        return profile_dict
+
+    def create_profile(self, profile_data):
+        """Create a new profile row (compat wrapper)"""
+        return self.write_profile(profile_data)
+
+    def update_profile(self, nickname, profile_data):
+        """Update an existing profile row (compat wrapper)"""
+        # Ensure nickname carried over for lookup
+        if nickname:
+            profile_data = dict(profile_data)
+            profile_data["NICK NAME"] = nickname
+        return self.write_profile(profile_data)
+
     # ==================== TARGET OPERATIONS ====================
     
     def get_pending_targets(self):
@@ -344,7 +370,11 @@ class SheetsManager:
         
         except Exception as e:
             log_msg(f"Failed to update target status: {e}", "ERROR")
-    
+
+    def update_runlist_status(self, row, status, remarks):
+        """Backward compatible alias for target status updates"""
+        return self.update_target_status(row, status, remarks)
+
     # ==================== ONLINE LOG OPERATIONS ====================
     
     def log_online_user(self, nickname, timestamp=None):
@@ -396,3 +426,34 @@ class SheetsManager:
             result = chr(index % 26 + 65) + result
             index //= 26
         return result
+
+    def sort_profiles_by_date(self):
+        """Sort profiles sheet by DATETIME SCRAP descending"""
+        try:
+            all_rows = self.profiles_ws.get_all_values()
+            if len(all_rows) <= 1:
+                return
+
+            header, rows = all_rows[0], all_rows[1:]
+            try:
+                date_idx = header.index("DATETIME SCRAP")
+            except ValueError:
+                log_msg("DATETIME SCRAP column not found, skipping sort", "WARNING")
+                return
+
+            def parse_date(row):
+                try:
+                    value = row[date_idx]
+                except IndexError:
+                    value = ""
+                try:
+                    return datetime.strptime(value, "%d-%b-%y %I:%M %p") if value else datetime.min
+                except Exception:
+                    return datetime.min
+
+            rows.sort(key=parse_date, reverse=True)
+            self.profiles_ws.update([header] + rows)
+            # Refresh cache to align row numbers
+            self._load_existing_profiles()
+        except Exception as e:
+            log_msg(f"Failed to sort profiles by date: {e}", "ERROR")
